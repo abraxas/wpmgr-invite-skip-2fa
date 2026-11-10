@@ -1,0 +1,79 @@
+# syntax=docker/dockerfile:1
+
+# ---- build stage ----
+# Multi-stage build of the WPMgr control-plane API (cmd/wpmgr).
+# Build context is the repo root so the Go workspace (go.work + sibling
+# modules) is available; we build the apps/api module with the workspace
+# disabled (GOWORK=off) so only its own go.mod/go.sum are needed.
+#
+# --platform=$BUILDPLATFORM pins the build stage to the runner's native
+# platform (always linux/amd64 on GitHub Actions). Go cross-compilation via
+# GOOS/GOARCH means the compile itself is fully native — no QEMU needed in
+# this stage. BUILDPLATFORM/TARGETOS/TARGETARCH are injected by BuildKit;
+# when building without --platform (e.g. prod Cloud Build on amd64) they
+# all default to the host, so the amd64-only path is unchanged.
+FROM --platform=$BUILDPLATFORM golang:1.26.10 AS build
+
+# TARGETOS / TARGETARCH are populated by BuildKit to match the target
+# platform being built (e.g. linux/arm64). CGO_ENABLED=0 means pure Go
+# cross-compilation with no C toolchain involvement.
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+
+ENV CGO_ENABLED=0 \
+    GOWORK=off
+
+WORKDIR /src
+
+# Cache module downloads. The api module's go.mod/go.sum are the only ones
+# needed when GOWORK=off. (go.sum may not exist yet during early phases;
+# the wildcard tolerates that.)
+COPY apps/api/go.mod apps/api/go.su[m] ./apps/api/
+RUN --mount=type=cache,target=/go/pkg/mod \
+    cd apps/api && go mod download || true
+
+# Copy the api module source.
+COPY apps/api ./apps/api
+
+ARG VERSION=0.0.0-dev
+
+# Build a static binary. -trimpath + stripped symbols for a lean image.
+# GOOS/GOARCH are set from the BuildKit-injected ARGs so the binary targets
+# the correct platform for each matrix leg of a multi-arch build.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    cd apps/api && \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath \
+        -ldflags "-s -w -X main.version=${VERSION}" \
+        -o /out/wpmgr ./cmd/wpmgr
+
+# wpmgr-cli is the admin tooling: migrate, gen-secrets, validate-env, and the
+# GH #408 `reclaim` family an operator needs when object storage has to be
+# reclaimed by hand. docs/install.md has instructed operators to run
+# `--entrypoint wpmgr-cli` inside this image since long before that existed, and
+# only the server binary was ever copied in, so that instruction could not work.
+# It is a second static binary from the same source tree and the same layer
+# cache; the image ENTRYPOINT is unchanged.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    cd apps/api && \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath \
+        -ldflags "-s -w -X main.version=${VERSION}" \
+        -o /out/wpmgr-cli ./cmd/wpmgr-cli
+
+# ---- final stage ----
+# Distroless static, running as the built-in nonroot user (uid 65532).
+FROM gcr.io/distroless/static:nonroot
+
+WORKDIR /
+COPY --from=build /out/wpmgr /usr/local/bin/wpmgr
+COPY --from=build /out/wpmgr-cli /usr/local/bin/wpmgr-cli
+
+USER nonroot:nonroot
+EXPOSE 8080
+
+ENV WPMGR_HTTP_ADDR=:8080
+
+ENTRYPOINT ["/usr/local/bin/wpmgr"]

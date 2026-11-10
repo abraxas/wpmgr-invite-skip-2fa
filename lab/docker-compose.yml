@@ -1,0 +1,124 @@
+name: wpmgrh05
+
+services:
+  postgres:
+    image: postgres:16.4-alpine
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POSTGRES_USER: wpmgr
+      POSTGRES_PASSWORD: wpmgr
+      POSTGRES_DB: wpmgr
+      WPMGR_DB_APP_USER: wpmgr_app
+      WPMGR_DB_APP_PASSWORD: wpmgr-app-dev-secret
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:18192:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wpmgr -d wpmgr"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  redis:
+    image: redis:7.4-alpine
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    command: ["redis-server", "--save", "", "--loglevel", "warning"]
+    ports:
+      - "127.0.0.1:18193:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  dex:
+    image: dexidp/dex:v2.41.1
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes:
+      - ./dex/config.yaml:/etc/dex/config.yaml:ro
+      - dex-data:/var/dex
+    ports:
+      - "127.0.0.1:18194:5556"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5558/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  mailpit:
+    image: axllent/mailpit:v1.21.8
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    ports:
+      - "127.0.0.1:18195:8025"
+      - "127.0.0.1:18196:1025"
+
+  api:
+    image: wpmgr-lab:v0.61.199
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    environment:
+      WPMGR_ENV: development
+      WPMGR_LOG_LEVEL: info
+      WPMGR_HTTP_ADDR: ":8080"
+      WPMGR_PUBLIC_BASE_URL: http://127.0.0.1:18191
+      WPMGR_SESSION_SECRET: wpmgr-h05-lab-session-secret-do-not-ship-xxk29qm
+      WPMGR_BOOTSTRAP_CLAIM_SECRET: wpmgr-h05-bootstrap-claim-lab-only
+      WPMGR_AUTH_PROXY_HOPS: "0"
+      WPMGR_AUTH_LOGIN_MODE: observe
+      WPMGR_DB_HOST: postgres
+      WPMGR_DB_PORT: "5432"
+      WPMGR_DB_USER: wpmgr_app
+      WPMGR_DB_PASSWORD: wpmgr-app-dev-secret
+      WPMGR_DB_NAME: wpmgr
+      WPMGR_DB_SSLMODE: disable
+      WPMGR_DB_MIGRATION_DSN: postgres://wpmgr:wpmgr@postgres:5432/wpmgr?sslmode=disable
+      WPMGR_ALLOW_RLS_BYPASS_ROLE: "false"
+      WPMGR_REDIS_ADDR: redis:6379
+      WPMGR_SMTP_HOST: mailpit
+      WPMGR_SMTP_PORT: "1025"
+      WPMGR_SMTP_TLS_MODE: none
+      WPMGR_SMTP_FROM: lab@wpmgr.local
+    ports:
+      - "127.0.0.1:18191:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    labels:
+      lab: WPMGR-H05-INVITE-2FA
+
+  web:
+    image: nginx:1.27-alpine
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:18190:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+
+volumes:
+  postgres-data:
+  dex-data:
